@@ -1,0 +1,194 @@
+<!--
+
+Copyright 2022 Akamai Technologies, Inc. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <base href="/vwr/assets/"/>
+    <title>Waiting Room</title>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+    <meta name="description" content=""/>
+    <meta name="keywords" content=""/>
+    <link rel="stylesheet" href="css/style.css"/>
+</head>
+<body>
+
+<script type="text/javascript" charset="utf-8">
+    let workerApi = null;
+    let intervalID = null;
+    const defaultPingFrequency = 1000;
+    let pingFrequency = defaultPingFrequency;
+    const fetchTimeout = 8000;
+    let fetchStart = 0;
+
+    if (typeof (SharedWorker) !== 'undefined'){
+        const worker = new SharedWorker('js/shared-worker.js');
+        worker.port.start();
+        worker.port.onmessage = () => {
+            checkQueue();
+        };
+        worker.port.postMessage(pingFrequency);
+        workerApi = worker.port;
+    }
+    else if (typeof (Worker) !== 'undefined') {
+        const worker = new Worker('js/worker.js');
+        worker.onmessage = () => {
+            checkQueue();
+        };
+        worker.postMessage(pingFrequency);
+        workerApi = worker;
+    } else {
+        intervalID = setInterval(() => checkQueue(), pingFrequency);
+    }
+
+    function setPingFrequency(requestedFrequency) {
+        if (pingFrequency !== requestedFrequency) {
+            pingFrequency = requestedFrequency;
+
+            if (workerApi !== null) {
+                workerApi.postMessage(pingFrequency);
+            } else if (intervalID !== null) {
+                clearInterval(intervalID);
+                intervalID = setInterval(() => checkQueue(), pingFrequency);
+            }
+        }
+    }
+
+    function checkQueue() {
+        let checkStart = Date.now();
+
+        if (fetchStart > 0) {
+            let fetchDuration = checkStart - fetchStart;
+            if (fetchDuration < fetchTimeout) {
+                setPingFrequency(defaultPingFrequency);
+                return;
+            }
+        }
+
+        fetchStart = checkStart;
+
+        fetch(window.location.href, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/vp+json',
+                'Content-Type': 'application/json'
+            }
+        }).then(response => {
+            return response.json()
+        }).then(body => {
+            if (body.status === 'allowed') {
+                window.location.reload(true);
+            } else if (body.status === 'rejected') {
+                if (workerApi !== null) {
+                    if (typeof(workerApi.close) === 'function') {
+                        workerApi.close();
+                    } else {
+                        workerApi.terminate();
+                    }
+                    workerApi = null;
+                } else if (intervalID !== null) {
+                    clearInterval(intervalID);
+                    intervalID = null;
+                }
+                document.getElementById("eta-header").innerHTML = 'Sorry!';
+                document.getElementById("eta").innerHTML = 'The Queue is full. <strong>Please come back later</strong>';
+            } else if (body.status === 'waiting' && body.eta) {
+                const now = new Date();
+                const eta = new Date(parseInt(body.eta));
+
+                const timeToEnterInSeconds = Math.round((eta.getTime() - now.getTime()) / 1000);
+
+                document.getElementById("eta").innerHTML = `You should be able to enter site in just <strong>${toHumanReadableForm(timeToEnterInSeconds)}</strong>`;
+            }
+            if (body.status !== 'allowed' && body.status !== 'rejected' && body.ping) {
+                const checkDuration = Date.now() - checkStart;
+                const requestedFrequency = body.ping;
+                if (checkDuration < requestedFrequency || requestedFrequency < pingFrequency) {
+                    setPingFrequency(requestedFrequency);
+                }
+            }
+        }).finally(() => {
+            if (fetchStart === checkStart) {
+                fetchStart = 0;
+            }
+        });
+
+        function toHumanReadableForm(durationInSeconds) {
+            if (durationInSeconds <= 1) {
+                return 'a second';
+            }
+            const numYears = Math.floor(durationInSeconds / (86400 * 365));
+            const numDays = Math.floor(durationInSeconds % (86400 * 365) / 86400);
+            const numHours = Math.floor(((durationInSeconds % (86400 * 365)) % 86400) / 3600);
+            const numMinutes = Math.floor((((durationInSeconds % (86400 * 365)) % 86400) % 3600) / 60);
+            const numSeconds = (((durationInSeconds % (86400 * 365)) % 86400) % 3600) % 60;
+
+            const seconds = () => (numSeconds ? (((durationInSeconds > 60) ? ' and ' + numSeconds + " second" : +numSeconds + " second") + (numSeconds === 1 ? '' : 's')) : '');
+
+            const minutes = () => {
+                if (numSeconds === 0 && numDays !== 0) {
+                    return 'and ' + (numMinutes ? numMinutes + " minute" + (numMinutes === 1 ? '' : 's') : '');
+                }
+                return (numMinutes ? numMinutes + " minute" + (numMinutes === 1 ? '' : 's') : '');
+            };
+
+            const hours = () => {
+                if (minutes().charAt(0) === 'a') {
+                    return (numHours ? numHours + " hour" + (numHours === 1 ? ' ' : 's ') : '');
+                }
+                if (numSeconds === 0 && numMinutes === 0) {
+                    return (numHours ? numHours + " hour" + (numHours === 1 ? '' : 's') : '');
+                }
+
+                return (numHours ? numHours + " hour" + (numHours === 1 ? ', ' : 's, ') : '');
+            };
+
+            const days = () => (numDays ? numDays + " day" + (numDays === 1 ? ', ' : 's, ') : '');
+
+            const years = () => (numYears ? numYears + " year" + (numYears === 1 ? ', ' : 's, ') : '');
+
+            return years() + days() + hours() + minutes() + seconds();
+        }
+
+    }
+</script>
+
+<section id="main" class="container">
+    <header>
+        <h2 id="eta-header">Please Wait</h2>
+        <h4 id="eta-row"><span id="eta"><span class="queuing">Calculating estimated waiting time</span></span></h4>
+        <div id="queue-row">
+            <img id="picture" src="images/waiting.svg" alt="waiting"/>
+        </div>
+    </header>
+</section>
+
+<footer id="footer">
+    <ul class="icons">
+        <li><a href="https://twitter.com/akamai"><i class="icon fab fa-twitter"></i></a></li>
+        <li><a href="https://facebook.com/AkamaiTechnologies"><i class="icon fab fa-facebook"></i></a></li>
+        <li><a href="https://github.com/akamai"><i class="icon fab fa-github"></i></a></li>
+    </ul>
+    <ul class="copyright">
+        <li>&copy; Akamai. All rights reserved.</li>
+    </ul>
+</footer>
+
+</body>
+</html>
